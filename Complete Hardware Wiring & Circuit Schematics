@@ -1,0 +1,119 @@
+# Complete Hardware Wiring & Circuit Schematics
+
+## SIH 2026: Adaptive Autonomous Vehicle Hardware Integration
+
+---
+
+## 1. Power Supply Architecture & Grounding Rules
+
+> [!CAUTION]
+> **CRITICAL POWER REQUIREMENT**:
+> Never power DC motors directly from the ESP32 3.3V or 5V pins! Motor current spikes will trigger the ESP32 brownout detector and cause continuous processor resets.
+
+### Recommended Dual-Rail Power Scheme:
+1. **Motor Power Rail (High Current)**: 7.4V (2S LiPo/Li-ion) or 11.1V (3S) connected directly to Motor Driver `VCC/VM` and `GND`.
+2. **Logic Power Rail (Regulated 5V)**: High-current 5V buck converter (LM2596 / XL4015) or dedicated USB power bank supplying:
+   * Main ESP32 `VIN` pin (5V)
+   * ESP32-CAM `5V` pin (requires at least 1.5A peak during Wi-Fi transmission)
+   * 5x HC-SR04 Ultrasonic Sensors `VCC` (5V)
+3. **Common Ground (`GND`)**: Connect the Battery GND, Motor Driver GND, ESP32 GND, and Sensor GND together at a single central star ground point.
+
+---
+
+## 2. Pinout Mappings
+
+### 2.1 Main ESP32 Controller (DevKit V1) Pinout
+
+| Subsystem | Function | ESP32 GPIO Pin | Connection to Hardware |
+|---|---|---|---|
+| **Ultrasonic Left (-90°)** | Trig | **GPIO 13** | HC-SR04 #1 (Left) TRIG |
+| | Echo | **GPIO 12** | HC-SR04 #1 (Left) ECHO (via divider) |
+| **Ultrasonic Front-Left (-45°)** | Trig | **GPIO 14** | HC-SR04 #2 (FL) TRIG |
+| | Echo | **GPIO 27** | HC-SR04 #2 (FL) ECHO (via divider) |
+| **Ultrasonic Front (0°)** | Trig | **GPIO 26** | HC-SR04 #3 (Front) TRIG |
+| | Echo | **GPIO 25** | HC-SR04 #3 (Front) ECHO (via divider) |
+| **Ultrasonic Front-Right (+45°)** | Trig | **GPIO 33** | HC-SR04 #4 (FR) TRIG |
+| | Echo | **GPIO 32** | HC-SR04 #4 (FR) ECHO (via divider) |
+| **Ultrasonic Right (+90°)** | Trig | **GPIO 15** | HC-SR04 #5 (Right) TRIG |
+| | Echo | **GPIO 4** | HC-SR04 #5 (Right) ECHO (via divider) |
+| **Left Motor Control** | IN1 (Dir) | **GPIO 18** | Driver IN1 / AIN1 |
+| | IN2 (Dir) | **GPIO 19** | Driver IN2 / AIN2 |
+| | ENA (PWM) | **GPIO 5** | Driver ENA / PWMA |
+| **Right Motor Control** | IN3 (Dir) | **GPIO 21** | Driver IN3 / BIN1 |
+| | IN4 (Dir) | **GPIO 22** | Driver IN4 / BIN2 |
+| | ENB (PWM) | **GPIO 23** | Driver ENB / PWMB |
+| **Encoders** | Left Encoder | **GPIO 34** | Left Optical/Hall Sensor D0 |
+| | Right Encoder | **GPIO 35** | Right Optical/Hall Sensor D0 |
+| **Status / Safety** | Status LED | **GPIO 2** | Onboard Blue LED |
+| | Piezo Alarm | **GPIO 16** | Active 5V Buzzer (+) |
+
+---
+
+## 3. Voltage Divider for HC-SR04 Ultrasonic Echo Pins
+
+> [!IMPORTANT]
+> The HC-SR04 Echo output is 5.0V, but the ESP32 GPIO inputs are rated for **3.3V maximum**. Use a simple 2-resistor voltage divider on each Echo pin:
+
+```
+HC-SR04 ECHO (5V Out) ───[ 1.0 kΩ ]───┬───> ESP32 ECHO GPIO Pin (3.3V)
+                                       │
+                                   [ 2.0 kΩ ]
+                                       │
+                                      GND
+```
+
+---
+
+## 4. Motor Driver Compatibility & Wiring Guides
+
+### A. L298N Dual H-Bridge Driver (Standard / Most Common)
+* `12V / VMS` $\rightarrow$ Battery (+) (7.4V to 12V)
+* `GND` $\rightarrow$ Battery (-) and ESP32 GND (Common Ground)
+* `5V (Logic Output)` $\rightarrow$ Can supply 5V to ESP32 if onboard regulator jumper is enabled
+* `ENA` $\rightarrow$ **GPIO 5** (Remove black jumper on ENA!)
+* `IN1` $\rightarrow$ **GPIO 18**
+* `IN2` $\rightarrow$ **GPIO 19**
+* `IN3` $\rightarrow$ **GPIO 21**
+* `IN4` $\rightarrow$ **GPIO 22**
+* `ENB` $\rightarrow$ **GPIO 23** (Remove black jumper on ENB!)
+* `OUT1, OUT2` $\rightarrow$ Left DC Motor terminals
+* `OUT3, OUT4` $\rightarrow$ Right DC Motor terminals
+
+### B. TB6612FNG Dual MOSFET Driver (High Efficiency / Low Heat)
+* `VM` $\rightarrow$ Motor Battery (+) (7.4V - 12V)
+* `VCC` $\rightarrow$ ESP32 3.3V or 5V logic
+* `GND` $\rightarrow$ Common Ground
+* `PWMA` $\rightarrow$ **GPIO 5**
+* `AIN1` $\rightarrow$ **GPIO 18**
+* `AIN2` $\rightarrow$ **GPIO 19**
+* `BIN1` $\rightarrow$ **GPIO 21**
+* `BIN2` $\rightarrow$ **GPIO 22**
+* `PWMB` $\rightarrow$ **GPIO 23**
+* `STBY` $\rightarrow$ Connect to **3.3V/5V** (or GPIO if programmed)
+* `AO1, AO2` $\rightarrow$ Left Motor
+* `BO1, BO2` $\rightarrow$ Right Motor
+
+### C. BTS7960 (43A High Current Driver for Heavy Vehicles)
+* `VCC` $\rightarrow$ 5V Logic
+* `GND` $\rightarrow$ Common Ground
+* `R_IS, L_IS` $\rightarrow$ Leave unconnected (or analog current sense)
+* `R_EN, L_EN` $\rightarrow$ Connect together to 5V (or ESP32 HIGH)
+* `RPWM` $\rightarrow$ Left Motor Forward PWM
+* `LPWM` $\rightarrow$ Left Motor Reverse PWM
+
+---
+
+## 5. ESP32-CAM Wiring & Flashing Setup
+
+The AI-Thinker ESP32-CAM does not have an onboard USB-to-UART chip. Use an **FTDI USB-to-TTL programmer**:
+
+```
+FTDI Programmer           ESP32-CAM
+  5V / VCC   ───────────>   5V (Pin 1)
+  GND        ───────────>   GND
+  TXD        ───────────>   U0R (GPIO 3)
+  RXD        ───────────>   U0T (GPIO 1)
+
+* TO FLASH CODE: Connect GPIO 0 to GND, then press RST button.
+* TO RUN STREAM: Disconnect GPIO 0 from GND, then press RST button.
+```
