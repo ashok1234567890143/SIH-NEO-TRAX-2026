@@ -1,0 +1,155 @@
+# System Architecture & Technical Specifications
+
+## SIH 2026: Adaptive Path Planning and Collision Avoidance for Autonomous Vehicles on Unstructured Indian Roads
+
+---
+
+## 1. High-Level Architectural Decomposition
+
+The system is partitioned into three decoupled computational tiers:
+
+```mermaid
+graph TD
+    subgraph Vision Node [Tier 1: ESP32-CAM Vision Streamer]
+        CAM_HW[OV2640 Sensor] -->|DVP Parallel Bus| CAM_CORE[ESP32-CAM SoC]
+        CAM_CORE -->|DMA Frame Buffer| HTTP_SRV[HTTP / MJPEG Streamer]
+    end
+
+    subgraph High-Level Brain [Tier 2: Laptop MATLAB Processing Node]
+        HTTP_SRV -->|Wi-Fi 802.11 b/g/n| MAT_CAM[Camera Frame Receiver]
+        MAT_CAM --> PERCEPT[Vision Perception & Edges]
+        
+        MAT_SER_IN[Serial Telemetry Receiver] --> FUSION[Multi-Sensor Fusion Engine]
+        PERCEPT --> FUSION
+        
+        FUSION --> COSTMAP[2D Dynamic Cost Map & Inflation]
+        COSTMAP --> REPLAN[Dynamic Collision & Replan Monitor]
+        REPLAN --> PLANNER[Adaptive RRT* / A* Path Planner]
+        PLANNER --> TRACKER[Pure Pursuit & Speed Controller]
+        TRACKER --> MAT_SER_OUT[Command Packet Encoder]
+        
+        COSTMAP -.-> JSON_EXP[Web JSON Telemetry Exporter]
+    end
+
+    subgraph Real-Time Reflex Node [Tier 3: Main ESP32 Vehicle Controller]
+        MAT_SER_OUT -->|USB Serial 115200 Baud| ESP_SERIAL[Command Parser]
+        
+        US_SENS[5x HC-SR04 Sensors] -->|Echo Pulse Timing| US_FILTER[Median Filter & Range Estimator]
+        US_FILTER --> HW_AEB[Hardware AEB Safety Override Layer]
+        
+        ESP_SERIAL --> HW_AEB
+        HW_AEB --> PWM_GEN[LEDC Dual PWM Motor Driver]
+        PWM_GEN --> MOTORS[Differential Drive DC Motors]
+        
+        ENCODERS[2x Wheel Encoders] -->|Hardware ISR| ENC_CTR[Encoder Odometry Counter]
+        ENC_CTR --> ESP_TELEM[Telemetry Formatter]
+        US_FILTER --> ESP_TELEM
+        ESP_TELEM --> MAT_SER_IN
+    end
+
+    subgraph Live Dashboard [Tier 4: HTML5 / Canvas Web Interface]
+        JSON_EXP -->|Polling / WebSocket Bridge| WEB_UI[Interactive HUD & Top-Down Road Map]
+    end
+```
+
+---
+
+## 2. Mathematical Models & Kinematics
+
+### 2.1 Differential Drive Vehicle Kinematic Model
+The vehicle pose in world coordinates is defined as $\mathbf{q} = [x, y, \theta]^T$. The differential drive kinematics with wheelbase $L$ and wheel radius $R$ are:
+
+$$\begin{bmatrix} \dot{x} \\ \dot{y} \\ \dot{\theta} \end{bmatrix} = \begin{bmatrix} \cos\theta & 0 \\ \sin\theta & 0 \\ 0 & 1 \end{bmatrix} \begin{bmatrix} v \\ \omega \end{bmatrix}$$
+
+Where forward linear velocity $v$ and angular velocity $\omega$ relate to individual wheel linear velocities $(v_L, v_R)$ by:
+
+$$v = \frac{v_R + v_L}{2}, \quad \omega = \frac{v_R - v_L}{L}$$
+
+Inverse kinematics for motor actuation:
+
+$$v_L = v - \frac{\omega L}{2}, \quad v_R = v + \frac{\omega L}{2}$$
+
+### 2.2 5-Channel Ultrasonic Sensor Spatial Transformation
+Each ultrasonic sensor $i \in \{1, 2, 3, 4, 5\}$ is mounted at fixed offset $d_{off,i}$ from the vehicle centroid at relative mounting angle $\beta_i \in \{-90^\circ, -45^\circ, 0^\circ, +45^\circ, +90^\circ\}$.
+
+The world coordinate of an obstacle hit detected at range $r_i$ is computed as:
+
+$$\alpha_i = \theta + \beta_i$$
+
+$$\begin{bmatrix} x_{hit,i} \\ y_{hit,i} \end{bmatrix} = \begin{bmatrix} x + d_{off,i} \cos\theta + r_i \cos\alpha_i \\ y + d_{off,i} \sin\theta + r_i \sin\alpha_i \end{bmatrix}$$
+
+### 2.3 Ground Plane Inverse Perspective Projection
+For an obstacle pixel centroid $(u, v)$ with bounding box base $v_{base}$ on an image of width $W$, height $H$, and camera focal length $f_{pix}$:
+
+$$d_{forward} = \frac{h_{cam} \cdot f_{pix}}{\max(v_{base} - v_{horizon}, \epsilon)}$$
+
+$$d_{lateral} = \frac{u - W/2}{f_{pix}} \cdot d_{forward}$$
+
+$$\begin{bmatrix} x_{obs} \\ y_{obs} \end{bmatrix} = \begin{bmatrix} x + d_{forward}\cos\theta - d_{lateral}\sin\theta \\ y + d_{forward}\sin\theta + d_{lateral}\cos\theta \end{bmatrix}$$
+
+### 2.4 Dynamic 2D Cost Grid & Continuous Gaussian Inflation
+The cost grid $C(x, y) \in [0.0, 1.0]$ is updated dynamically:
+
+$$C(r, c) = C_{static}(r, c) + \max_{i} \left( \mathbb{I}_{\{d_i \le R_{lethal}\}} \cdot 1.0 + \mathbb{I}_{\{R_{lethal} < d_i \le R_{total}\}} \cdot \exp\left( -3 \cdot \left(\frac{d_i - R_{lethal}}{R_{inflation}}\right)^2 \right) \right)$$
+
+Temporal decay for dynamic obstacles:
+
+$$C_{t}(r, c) = C_{static}(r, c) + \gamma \cdot (C_{t-1}(r, c) - C_{static}(r, c)), \quad \gamma = 0.92$$
+
+---
+
+## 3. Communication Protocols
+
+### 3.1 MATLAB $\rightarrow$ Main ESP32 (USB Serial @ 115200 Baud, LF terminated)
+| Packet Format | Description | Example |
+|---|---|---|
+| `SET_MOTORS,<pwmL>,<pwmR>` | Sets direct PWM speed for left and right motors ($-255$ to $255$) | `SET_MOTORS,160,120` |
+| `FORWARD,<speed>` | Drives forward at specified PWM duty | `FORWARD,150` |
+| `BACKWARD,<speed>` | Drives backward at specified PWM duty | `BACKWARD,120` |
+| `LEFT,<speed>` | Turns left differential | `LEFT,140` |
+| `RIGHT,<speed>` | Turns right differential | `RIGHT,140` |
+| `STOP,0` | Active motor brake | `STOP,0` |
+| `EMERGENCY_STOP` | Hard safety override brake | `EMERGENCY_STOP` |
+| `PING` | Communication heartbeat watchdog refresh | `PING` |
+| `RESET_ENC` | Clears hardware encoder tick counters | `RESET_ENC` |
+
+### 3.2 Main ESP32 $\rightarrow$ MATLAB (USB Serial @ 20 Hz)
+| Packet Format | Description | Example |
+|---|---|---|
+| `US,L:<d>,FL:<d>,F:<d>,FR:<d>,R:<d>` | 5-channel ultrasonic distances in centimeters | `US,L:140.2,FL:95.0,F:48.5,FR:110.0,R:150.0` |
+| `ENC,<leftTicks>,<rightTicks>` | Cumulative hardware encoder pulse counts | `ENC,1240,1238` |
+| `STATE,<state>,PWM:<lPWM>,<rPWM>` | Real-time vehicle operating state & active PWM | `STATE,FORWARD,PWM:150,150` |
+| `WARN,<warningType>` | Proximity or system warnings | `WARN,OBSTACLE_AHEAD_48.5` |
+
+### 3.3 ESP32-CAM $\rightarrow$ MATLAB (HTTP Wi-Fi Endpoint)
+* `GET http://<ESP32-CAM-IP>/capture`: Returns single full-resolution JPEG frame for frame-by-frame MATLAB image processing.
+* `GET http://<ESP32-CAM-IP>/stream`: Standard multipart MJPEG video stream.
+* `GET http://<ESP32-CAM-IP>/status`: Returns JSON device health status, RSSI, and streaming FPS.
+* `GET http://<ESP32-CAM-IP>/flash?state=1`: Controls on-board LED illumination for night road navigation.
+
+---
+
+## 4. Multi-Tier Deterministic Safety Architecture
+
+```
++-------------------------------------------------------------+
+| Layer 1: MATLAB Vision & Cost Map Lookahead Replanner       |
+| • Lookahead horizon: 1.2 meters                            |
+| • RRT* / Evasive Tentacle dynamic replanning                |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+| Layer 2: Main ESP32 Real-Time Hardware AEB Override         |
+| • Front sensor < 18 cm OR Diagonal < 12 cm                  |
+| • Overrides all MATLAB motor commands to 0 PWM immediately  |
+| • Triggers audio-visual alarm buzzer                        |
++-------------------------------------------------------------+
+                              |
+                              v
++-------------------------------------------------------------+
+| Layer 3: Serial Heartbeat Watchdog Timeout                  |
+| • 1500 ms timeout if USB cable disconnected or MATLAB halts |
+| • Automatically engages active motor braking                |
++-------------------------------------------------------------+
+```
