@@ -1,0 +1,141 @@
+# SIH 2026 13-Phase Test Procedure & Verification Checklist
+
+## Step-by-Step Hardware & Software Testing Protocol
+
+Follow this structured 13-phase verification sequence before performing the final demonstration.
+
+---
+
+### PHASE 1: ESP32 Motor Control Verification
+* **Goal**: Validate motor driver direction, PWM responsiveness, and differential rotation.
+* **Test Procedure**:
+  1. Upload `ESP32/main_controller/main_controller.ino`.
+  2. Open Arduino Serial Monitor at 115200 baud.
+  3. Send: `FORWARD,150` $\rightarrow$ Both wheels should spin forward.
+  4. Send: `BACKWARD,120` $\rightarrow$ Both wheels spin in reverse.
+  5. Send: `LEFT,150` $\rightarrow$ Left wheel reverses, right wheel spins forward.
+  6. Send: `RIGHT,150` $\rightarrow$ Right wheel reverses, left wheel spins forward.
+  7. Send: `STOP,0` $\rightarrow$ Immediate motor stop.
+* **Expected Serial Output**: `OK,FORWARD,150`, `OK,STOPPED`.
+
+---
+
+### PHASE 2: Ultrasonic Sensor Array & Digital Filtering
+* **Goal**: Validate accurate centimeter readings from all 5 ultrasonic sensors.
+* **Test Procedure**:
+  1. Hold a flat cardboard obstacle at 30 cm from each sensor (L, FL, F, FR, R).
+  2. Observe serial telemetry packets printed at 20 Hz:
+     `US,L:120.0,FL:85.0,F:30.2,FR:90.0,R:130.0`
+  3. Verify that the median filter rejects hand movement noise and out-of-range echoes.
+
+---
+
+### PHASE 3: Autonomous Emergency Braking (AEB) Hardware Layer
+* **Goal**: Verify that the ESP32 safety layer overrides commands if an obstacle is within 18 cm.
+* **Test Procedure**:
+  1. Place an object 10 cm directly in front of the Front sensor.
+  2. Send: `FORWARD,180`.
+  3. Observe that motors **DO NOT SPIN**, buzzer sounds, and ESP32 returns:
+     `ERR,AEB_TRIGGERED_OBSTACLE_TOO_CLOSE`.
+
+---
+
+### PHASE 4: Serial Communication Watchdog
+* **Goal**: Ensure the vehicle automatically stops if USB cable disconnects or MATLAB hangs.
+* **Test Procedure**:
+  1. Send: `FORWARD,150`.
+  2. Unplug the USB cable or stop sending commands for > 1500 ms.
+  3. Observe that the motors immediately halt and state changes to `WATCHDOG_STOP`.
+
+---
+
+### PHASE 5: ESP32-CAM Wi-Fi Video Streaming
+* **Goal**: Establish stable MJPEG stream and single-frame snapshot capture over Wi-Fi.
+* **Test Procedure**:
+  1. Flash `ESP32_CAM/camera_stream/camera_stream.ino`.
+  2. Open browser and visit: `http://<ESP32-CAM-IP>/status`.
+  3. Verify JSON status: `{"status":"ONLINE","fps":25.0}`.
+  4. Visit: `http://<ESP32-CAM-IP>/stream` to verify the live video feed.
+
+---
+
+### PHASE 6: MATLAB Camera Perception & Edge Detection
+* **Goal**: Test MATLAB image grabber and unstructured road segmentation.
+* **Test Procedure**:
+  1. In MATLAB, run:
+     ```matlab
+     cfg = config();
+     camObj = connectCamera(cfg);
+     frame = getCameraFrame(camObj, cfg);
+     dets = processCameraFrame(frame, cfg);
+     imshow(frame);
+     ```
+  2. Verify road mask and edge contours are extracted without errors.
+
+---
+
+### PHASE 7: Multi-Sensor Fusion Engine
+* **Goal**: Correlate ultrasonic ranges with camera bearings.
+* **Test Procedure**:
+  1. Run `sensors/sensorFusion.m` with simulated sensor telemetry.
+  2. Verify that Cartesian cluster points $(x, y)$ and threat level (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`) are computed correctly.
+
+---
+
+### PHASE 8: 2D Dynamic Cost Map & Gaussian Inflation
+* **Goal**: Test road corridor boundary constraints and obstacle inflation buffers.
+* **Test Procedure**:
+  1. In MATLAB:
+     ```matlab
+     costMap = createCostMap(config());
+     obs.x = 4.0; obs.y = 0.0; obs.radius = 0.4; obs.type = 'COW';
+     costMap = updateCostMap(costMap, obs, [0,0,0], config());
+     imagesc(costMap.grid); colorbar;
+     ```
+  2. Observe Gaussian cost gradients around the obstacle and high cost on off-road curbs.
+
+---
+
+### PHASE 9: Adaptive RRT* Path Planner & A* Fallback
+* **Goal**: Verify RRT* convergence and smooth waypoint spline generation.
+* **Test Procedure**:
+  1. In MATLAB:
+     ```matlab
+     [path, success, info] = adaptivePathPlanner([0, 0, 0], [10, 0], costMap, config());
+     fprintf('Planning success: %d | Time: %.3fs | Cost: %.2f\n', success, info.planningTime, info.cost);
+     ```
+  2. Verify that the planned path smoothly bypasses the obstacle at $(4.0, 0.0)$.
+
+---
+
+### PHASE 10: Dynamic Collision Detection & Lookahead Replanning
+* **Goal**: Validate that newly appeared obstacles trigger immediate path replanning.
+* **Test Procedure**:
+  1. Call `planning/replanPath.m` with an active path that intersects an obstacle.
+  2. Verify that replanning outputs a safe evasive tentacle bypass within **<20 ms**.
+
+---
+
+### PHASE 11: Pure Pursuit Differential Motion Tracking
+* **Goal**: Ensure smooth motor PWM outputs and heading convergence along curved paths.
+* **Test Procedure**:
+  1. Test `control/vehicleController.m` across various lookahead distances.
+  2. Verify that linear velocity scales down smoothly during sharp turns.
+
+---
+
+### PHASE 12: HTML5 Real-Time Web Dashboard
+* **Goal**: Validate live Canvas road simulation, gauge meters, and JSON data sync.
+* **Test Procedure**:
+  1. Open `SIH_Autonomous_Vehicle/WEB/index.html` in browser.
+  2. Click **START MISSION**.
+  3. Select different scenarios (Auto-Rickshaw, Holy Cow, Pedestrian).
+  4. Click **SPAWN COW** and observe live path re-planning animation.
+
+---
+
+### PHASE 13: End-to-End Autonomous Mission & Demonstration
+* **Goal**: Full autonomous mission from start to destination with adaptive obstacle avoidance.
+* **Test Procedure**:
+  1. Launch `main.m` in MATLAB.
+  2. Observe the vehicle navigate the corridor, detect obstacles, replan safely, and report benchmark performance metrics.
